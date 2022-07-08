@@ -1,121 +1,34 @@
 #
-# NOTE: THIS DOCKERFILE IS GENERATED VIA "apply-templates.sh"
+# MariaDB Dockerfile
 #
-# PLEASE DO NOT EDIT IT DIRECTLY.
+# https://github.com/dockerfile/mariadb
 #
 
-FROM oraclelinux:8-slim
+# Pull base image.
+FROM dockerfile/ubuntu
 
-RUN set -eux; \
-	groupadd --system --gid 999 mysql; \
-	useradd --system --uid 999 --gid 999 --home-dir /var/lib/mysql --no-create-home mysql; \
-	\
-	mkdir /var/lib/mysql /var/run/mysqld; \
-	chown mysql:mysql /var/lib/mysql /var/run/mysqld; \
-# ensure that /var/run/mysqld (used for socket and lock files) is writable regardless of the UID our mysqld instance ends up having at runtime
-	chmod 1777 /var/lib/mysql /var/run/mysqld; \
-	\
-	mkdir /docker-entrypoint-initdb.d
+# Install MariaDB.
+RUN \
+  apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 0xcbcb082a1bb943db && \
+  echo "deb http://mariadb.mirror.iweb.com/repo/10.0/ubuntu `lsb_release -cs` main" > /etc/apt/sources.list.d/mariadb.list && \
+  apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server && \
+  rm -rf /var/lib/apt/lists/* && \
+  sed -i 's/^\(bind-address\s.*\)/# \1/' /etc/mysql/my.cnf && \
+  echo "mysqld_safe &" > /tmp/config && \
+  echo "mysqladmin --silent --wait=30 ping || exit 1" >> /tmp/config && \
+  echo "mysql -e 'GRANT ALL PRIVILEGES ON *.* TO \"root\"@\"%\" WITH GRANT OPTION;'" >> /tmp/config && \
+  bash /tmp/config && \
+  rm -f /tmp/config
 
-# add gosu for easy step-down from root
-# https://github.com/tianon/gosu/releases
-ENV GOSU_VERSION 1.14
-RUN set -eux; \
-# TODO find a better userspace architecture detection method than querying the kernel
-	arch="$(uname -m)"; \
-	case "$arch" in \
-		aarch64) gosuArch='arm64' ;; \
-		x86_64) gosuArch='amd64' ;; \
-		*) echo >&2 "error: unsupported architecture: '$arch'"; exit 1 ;; \
-	esac; \
-	curl -fL -o /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$gosuArch.asc"; \
-	curl -fL -o /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$gosuArch"; \
-	export GNUPGHOME="$(mktemp -d)"; \
-	gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
-	gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
-	rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
-	chmod +x /usr/local/bin/gosu; \
-	gosu --version; \
-	gosu nobody true
+# Define mountable directories.
+VOLUME ["/etc/mysql", "/var/lib/mysql"]
 
-RUN set -eux; \
-	microdnf install -y \
-		bzip2 \
-		gzip \
-		openssl \
-		xz \
-		zstd \
-# Oracle Linux 8+ is very slim :)
-		findutils \
-	; \
-	microdnf clean all
+# Define working directory.
+WORKDIR /data
 
-RUN set -eux; \
-# https://dev.mysql.com/doc/refman/8.0/en/checking-gpg-signature.html
-# gpg: key 3A79BD29: public key "MySQL Release Engineering <mysql-build@oss.oracle.com>" imported
-	key='859BE8D7C586F538430B19C2467B942D3A79BD29'; \
-	export GNUPGHOME="$(mktemp -d)"; \
-	gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key"; \
-	gpg --batch --export --armor "$key" > /etc/pki/rpm-gpg/RPM-GPG-KEY-mysql; \
-	rm -rf "$GNUPGHOME"
+# Define default command.
+CMD ["mysqld_safe"]
 
-ENV MYSQL_MAJOR 8.0
-ENV MYSQL_VERSION 8.0.29-1.el8
-
-RUN set -eu; \
-	. /etc/os-release; \
-	{ \
-		echo '[mysql8.0-server-minimal]'; \
-		echo 'name=MySQL 8.0 Server Minimal'; \
-		echo 'enabled=1'; \
-		echo "baseurl=https://repo.mysql.com/yum/mysql-8.0-community/docker/el/${VERSION_ID%%[.-]*}/\$basearch/"; \
-		echo 'gpgcheck=1'; \
-		echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mysql'; \
-# https://github.com/docker-library/mysql/pull/680#issuecomment-825930524
-		echo 'module_hotfixes=true'; \
-	} | tee /etc/yum.repos.d/mysql-community-minimal.repo
-
-RUN set -eux; \
-	microdnf install -y "mysql-community-server-minimal-$MYSQL_VERSION"; \
-	microdnf clean all; \
-# the "socket" value in the Oracle packages is set to "/var/lib/mysql" which isn't a great place for the socket (we want it in "/var/run/mysqld" instead)
-# https://github.com/docker-library/mysql/pull/680#issuecomment-636121520
-	grep -F 'socket=/var/lib/mysql/mysql.sock' /etc/my.cnf; \
-	sed -i 's!^socket=.*!socket=/var/run/mysqld/mysqld.sock!' /etc/my.cnf; \
-	grep -F 'socket=/var/run/mysqld/mysqld.sock' /etc/my.cnf; \
-	{ echo '[client]'; echo 'socket=/var/run/mysqld/mysqld.sock'; } >> /etc/my.cnf; \
-	\
-# make sure users dumping files in "/etc/mysql/conf.d" still works
-	! grep -F '!includedir' /etc/my.cnf; \
-	{ echo; echo '!includedir /etc/mysql/conf.d/'; } >> /etc/my.cnf; \
-	mkdir -p /etc/mysql/conf.d; \
-	\
-	mysqld --version; \
-	mysql --version
-
-RUN set -eu; \
-	. /etc/os-release; \
-	{ \
-		echo '[mysql-tools-community]'; \
-		echo 'name=MySQL Tools Community'; \
-		echo "baseurl=https://repo.mysql.com/yum/mysql-tools-community/el/${VERSION_ID%%[.-]*}/\$basearch/"; \
-		echo 'enabled=1'; \
-		echo 'gpgcheck=1'; \
-		echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mysql'; \
-# https://github.com/docker-library/mysql/pull/680#issuecomment-825930524
-		echo 'module_hotfixes=true'; \
-	} | tee /etc/yum.repos.d/mysql-community-tools.repo
-ENV MYSQL_SHELL_VERSION 8.0.29-1.el8
-RUN set -eux; \
-	microdnf install -y "mysql-shell-$MYSQL_SHELL_VERSION"; \
-	microdnf clean all; \
-	\
-	mysqlsh --version
-
-VOLUME /var/lib/mysql
-
-COPY docker-entrypoint.sh /usr/local/bin/
-ENTRYPOINT ["docker-entrypoint.sh"]
-
-EXPOSE 3306 33060
-CMD ["mysqld"]
+# Expose ports.
+EXPOSE 3306
